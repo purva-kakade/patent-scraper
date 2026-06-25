@@ -12,7 +12,11 @@ https://iprsearch.ipindia.gov.in/publicsearch :
        e.g.  A61K,A61P | C07D | H04L,G06F,H04W   →  "A61K,A61P|C07D|H04L,G06F,H04W"
 
 Output (the deliverable):  total_patent_ipc_collector.csv
-    Institute, TotalPatents, IPC          (one row per college, re-run overwrites)
+    Long format — 12 rows per college (re-running a college overwrites its rows):
+        Institute, Year, Patents, IPC
+      • Row 1     → Year="Total": the total patent count + every patent's IPC.
+      • Rows 2-12 → one row per year 2014 … 2024: that year's patent count + IPC.
+      A year with 0 patents has Patents=0 and IPC=0.
 
 Input flow is the SAME as the existing Scraper.py:
     You manually fill the search form (Applicant Name AND institute, the
@@ -37,9 +41,11 @@ import re
 import os
 import pandas as pd
 
-# Filenames -----------------------------------------------------------------
+# Filenames / constants -----------------------------------------------------
 SUMMARY_FILE = "total_patent_ipc_collector.csv"          # the deliverable
 RESULTS_PER_PAGE = 25
+YEAR_START, YEAR_END = 2014, 2024
+YEARS = [str(y) for y in range(YEAR_START, YEAR_END + 1)]  # "2014" … "2024" (11)
 
 
 # ── Parsing helpers ────────────────────────────────────────────────────────
@@ -85,20 +91,58 @@ def normalize_ipc(raw: str) -> list[str]:
     return codes
 
 
-# ── Summary (deliverable) helper ───────────────────────────────────────────
-def write_summary(institute: str, total: int, ipc_string: str):
-    """Write/refresh the single summary row for this institute (deliverable)."""
-    columns = ["Institute", "TotalPatents", "IPC"]
-    rows: list[dict] = []
+# ── Summary (deliverable) helpers ──────────────────────────────────────────
+SUMMARY_COLUMNS = ["Institute", "Year", "Patents", "IPC"]
+
+
+def _ipc_string(records: list[dict]) -> str:
+    """Join a list of patent records into the IPC string: codes within a patent
+    separated by ',', patents separated by '|'."""
+    return "|".join(",".join(rec["ipc_codes"]) for rec in records)
+
+
+def build_institute_rows(institute: str, ordered_records: list[dict]) -> list[dict]:
+    """
+    Build the 12 output rows for one institute:
+      • Row 1     → Year="Total": total patent count + every patent's IPC.
+      • Rows 2-12 → one per year 2014…2024: that year's count + IPC.
+    A year with no patents gets Patents=0 and IPC="0".
+    """
+    rows = [{
+        "Institute": institute,
+        "Year": "Total",
+        "Patents": len(ordered_records),
+        "IPC": _ipc_string(ordered_records),
+    }]
+
+    for year in YEARS:
+        year_records = [r for r in ordered_records if r["year"] == year]
+        if year_records:
+            patents = len(year_records)
+            ipc = _ipc_string(year_records)
+        else:
+            patents = 0
+            ipc = "0"
+        rows.append({"Institute": institute, "Year": year,
+                     "Patents": patents, "IPC": ipc})
+    return rows
+
+
+def write_summary(institute: str, rows: list[dict]):
+    """Write/refresh ALL rows for this institute (replacing any previous run)."""
+    existing: list[dict] = []
 
     if os.path.exists(SUMMARY_FILE):
         sdf = pd.read_csv(SUMMARY_FILE, dtype=str).fillna("")
-        # keep every OTHER institute, drop this one so we overwrite it
-        sdf = sdf[sdf["Institute"].str.strip().str.lower() != institute.strip().lower()]
-        rows = sdf.to_dict("records")
+        # Only reuse existing data if it is already in the new 12-row format;
+        # an older single-row file is simply replaced.
+        if set(SUMMARY_COLUMNS).issubset(sdf.columns):
+            sdf = sdf[sdf["Institute"].str.strip().str.lower()
+                      != institute.strip().lower()]
+            existing = sdf.to_dict("records")
 
-    rows.append({"Institute": institute, "TotalPatents": total, "IPC": ipc_string})
-    pd.DataFrame(rows, columns=columns).to_csv(SUMMARY_FILE, index=False)
+    combined = existing + rows
+    pd.DataFrame(combined, columns=SUMMARY_COLUMNS).to_csv(SUMMARY_FILE, index=False)
 
 
 # ── Robust browser actions (never silently skip) ───────────────────────────
@@ -343,10 +387,10 @@ def main():
             if current_page < total_pages - 1:
                 advance_to_next_page(page, current_page + 2)
 
-        # ── Build the deliverable ──────────────────────────────────────────
-        ipc_string = "|".join(",".join(rec["ipc_codes"]) for rec in ordered_records)
+        # ── Build the deliverable (12 rows: Total + each year 2014-2024) ───
+        rows = build_institute_rows(institute_name, ordered_records)
+        write_summary(institute_name, rows)
         total = len(ordered_records)
-        write_summary(institute_name, total, ipc_string)
 
         # ── Report ─────────────────────────────────────────────────────────
         print("\n==================== DONE ====================")
@@ -360,6 +404,16 @@ def main():
                 print("      collect them (this starts a fresh pass).")
             else:
                 print("  ✅ Count matches the site — nothing was lost.")
+
+        print("Year-wise breakdown:")
+        for r in rows:
+            if r["Year"] != "Total":
+                print(f"   {r['Year']}: {r['Patents']}")
+        year_sum = sum(int(r["Patents"]) for r in rows if r["Year"] != "Total")
+        if year_sum != total:
+            print(f"   ⚠️  {total - year_sum} patent(s) had a filing year outside "
+                  f"{YEAR_START}-{YEAR_END} (or unreadable) — counted in Total only.")
+
         print(f"Saved summary to:       {SUMMARY_FILE}")
         print("=============================================")
 
