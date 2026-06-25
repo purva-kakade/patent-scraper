@@ -5,8 +5,7 @@ __pycache__/
 # macOS
 .DS_Store
 
-# Scraper outputs / progress (regenerated each run)
+# Scraper outputs (regenerated each run)
 total_patent_ipc_collector.csv
-total_patent_ipc_progress.csv
 all_collaborative_patents.csv
 all_collaborative_patents.xlsx

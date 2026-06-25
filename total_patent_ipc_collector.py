@@ -30,20 +30,15 @@ This collector NEVER silently skips:
     • Turning the page is verified (the first result must actually change). If
       the site crashes, it asks you to navigate manually and waits — it will
       not advance until the next page is really loaded.
-    • Every scraped patent is appended immediately to a progress file, so even
-      a hard crash loses nothing: just re-run and re-do the search; already
-      scraped patents are skipped and it resumes where it left off.
 """
 
 from playwright.sync_api import sync_playwright
 import re
 import os
-import csv
 import pandas as pd
 
 # Filenames -----------------------------------------------------------------
 SUMMARY_FILE = "total_patent_ipc_collector.csv"          # the deliverable
-PROGRESS_FILE = "total_patent_ipc_progress.csv"          # resume / crash safety
 RESULTS_PER_PAGE = 25
 
 
@@ -90,44 +85,7 @@ def normalize_ipc(raw: str) -> list[str]:
     return codes
 
 
-# ── Progress (resume) helpers ──────────────────────────────────────────────
-def append_progress(institute: str, app_no: str, year: str, codes: list[str]):
-    """Append one scraped patent to the progress file immediately (crash-safe)."""
-    is_new = not os.path.exists(PROGRESS_FILE)
-    with open(PROGRESS_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)            # quotes any field containing commas
-        if is_new:
-            writer.writerow(["Institute", "ApplicationNumber", "Year", "IPC"])
-        writer.writerow([institute, app_no, year, ",".join(codes)])
-
-
-def load_progress(institute: str):
-    """
-    Re-load patents already scraped for THIS institute so a re-run resumes
-    instead of starting over. Returns (ordered_records, seen_app_numbers).
-    """
-    ordered_records: list[dict] = []
-    seen_app_numbers: set[str] = set()
-
-    if not os.path.exists(PROGRESS_FILE):
-        return ordered_records, seen_app_numbers
-
-    df = pd.read_csv(PROGRESS_FILE, dtype=str).fillna("")
-    target = institute.strip().lower()
-    for _, row in df.iterrows():
-        if row.get("Institute", "").strip().lower() != target:
-            continue
-        app_no = row.get("ApplicationNumber", "").strip()
-        if not app_no or app_no in seen_app_numbers:
-            continue
-        seen_app_numbers.add(app_no)
-        codes = [c for c in row.get("IPC", "").split(",") if c.strip()]
-        ordered_records.append(
-            {"app_no": app_no, "year": row.get("Year", "").strip(), "ipc_codes": codes}
-        )
-    return ordered_records, seen_app_numbers
-
-
+# ── Summary (deliverable) helper ───────────────────────────────────────────
 def write_summary(institute: str, total: int, ipc_string: str):
     """Write/refresh the single summary row for this institute (deliverable)."""
     columns = ["Institute", "TotalPatents", "IPC"]
@@ -341,11 +299,9 @@ def main():
             print("Page count detection failed:", e)
         print(f"TOTAL PAGES TO VISIT: {total_pages}\n")
 
-        # ── Resume anything already scraped for this institute ─────────────
-        ordered_records, seen_app_numbers = load_progress(institute_name)
-        if seen_app_numbers:
-            print(f"Resuming: {len(seen_app_numbers)} patents already scraped "
-                  f"for '{institute_name}' will be skipped.\n")
+        # ── Collect patents for this institute (kept in memory) ────────────
+        ordered_records: list[dict] = []
+        seen_app_numbers: set[str] = set()  # de-dup within this run
 
         # ── Scrape every page, every row ───────────────────────────────────
         for current_page in range(total_pages):
@@ -379,7 +335,6 @@ def main():
                 ordered_records.append(
                     {"app_no": application_number, "year": year, "ipc_codes": codes}
                 )
-                append_progress(institute_name, application_number, year, codes)
 
                 shown = ",".join(codes) if codes else "(no IPC listed)"
                 print(f"   ✅ {year or '????'}  IPC: {shown}")
@@ -401,12 +356,11 @@ def main():
             print(f"Site reported total:    {total_docs}")
             if total != total_docs:
                 print(f"  ⚠️  MISMATCH of {abs(total_docs - total)} — some patents may be")
-                print("      missing. Just re-run the script and redo the same search;")
-                print("      it resumes and fills the gaps (nothing already saved is lost).")
+                print("      missing. Re-run the script and redo the same search to")
+                print("      collect them (this starts a fresh pass).")
             else:
                 print("  ✅ Count matches the site — nothing was lost.")
         print(f"Saved summary to:       {SUMMARY_FILE}")
-        print(f"Progress / resume file: {PROGRESS_FILE}")
         print("=============================================")
 
         input("\nPress ENTER to close the browser...")
